@@ -924,6 +924,7 @@
       "openHomepage": "打开主页"
     },
     "shortcuts": {
+      "batchEditGrid": "批量编辑所选内容",
       "title": "键盘快捷键",
       "categories": {
         "editor": "编辑器",
@@ -1419,6 +1420,8 @@
     "fillDown": "向下填充",
     "setToValue": "设为值…",
     "setToValueTitle": "为所选单元格设置值",
+    "pkRequiredToEdit": "要编辑此结果，需包含主键列 \"{{pk}}\"。",
+    "columnNotEditable": "列 \"{{column}}\" 无法编辑 —— 它不是表 \"{{table}}\" 的直接字段（可能是别名或计算值）。",
     "setToValueLabel": "值",
     "setToValueApply": "应用",
     "trimWhitespace": "去除首尾空白",
@@ -1428,6 +1431,7 @@
     "pasteReadFailed": "无法读取剪贴板",
     "copyColumnName": "复制列名",
     "copyColumnNameQuoted": "复制为 `列`",
+    "batchEditAction": "批量编辑…",
     "copyColumnNameTable": "复制为 表.列",
     "copyColumnNames": "复制所有列名",
     "copyColumnNamesLines": "每行一个",
@@ -2761,5 +2765,27 @@
     "groups": { "builtin": "内置 · 离线", "installed": "已安装主题包", "personal": "个人主题" }, "modes": { "light": "浅色", "dark": "深色", "high-contrast": "高对比度" },
     "importErrors": { "unrecognized": "无法识别此 VS Code 主题。", "modeRequired": "请选择模式，然后重新预览。", "includeOnly": "无法导入仅含 include 的主题。请提供实际颜色数据。", "noSupportedData": "未找到支持的颜色或 SQL 词法规则。", "invalidColor": "某个支持的颜色值无效。", "invalidRules": "词法规则无效或过多。" },
     "diagnostics": { "unsupportedKey": "不支持的字段", "unsupportedColor": "不支持的颜色", "unsupportedScope": "不支持的作用域", "scopeApproximation": "近似 SQL 作用域映射", "unsupportedStyle": "不支持的样式", "ignoredInclude": "未加载 include", "ignoredSemanticTokens": "已忽略语义词法标记", "unsupportedReference": "未加载外部引用", "unsupportedSetting": "不支持的设置", "tokenAlphaFlattened": "词法标记不透明度按基础背景计算", "modeApproximation": "模式已覆盖或近似转换", "diagnosticsTruncated": "已省略其他诊断信息" }
+  },
+  "batchEdit": {
+    "title": "批量编辑",
+    "subtitle": "{{rows}} 行 · {{columns}} 个可编辑列",
+    "apply": "应用",
+    "dirtyCount": "已修改 {{count}} 个单元格",
+    "noChanges": "尚未修改",
+    "revertRow": "还原此行",
+    "revertAll": "全部还原",
+    "deleteRows": "标记删除所选行",
+    "keyboardHint": "Enter/↓ 下一行 · Tab 下一列 · Esc 关闭",
+    "emptyValue": "（空）",
+    "nullValue": "NULL",
+    "true": "是",
+    "false": "否",
+    "pk": "主键",
+    "noKeyHint": "此结果没有主键，已有行只能查看。新增行仍可编辑。",
+    "readonlyGenerated": "生成列 —— 该值由数据库计算",
+    "readonlyMasked": "脱敏列 —— 请先在网格中显示后再编辑",
+    "readonlyBlob": "二进制值 —— 请在网格或行编辑器中修改",
+    "readonlyNotPhysical": "计算得出的结果列 —— 不是表字段",
+    "readonlyNoKey": "无主键 —— 此行无法更新"
   }
 }

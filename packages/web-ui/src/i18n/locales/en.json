@@ -1028,6 +1028,7 @@
       "openHomepage": "Open homepage"
     },
     "shortcuts": {
+      "batchEditGrid": "Batch edit selection",
       "title": "Keyboard Shortcuts",
       "categories": {
         "editor": "Editor",
@@ -1522,6 +1523,7 @@
     "pasteReadFailed": "Couldn't read the clipboard",
     "copyColumnName": "Copy column name",
     "copyColumnNameQuoted": "Copy as `column`",
+    "batchEditAction": "Batch edit…",
     "copyColumnNameTable": "Copy as table.column",
     "copyColumnNames": "Copy column names",
     "copyColumnNamesLines": "One per line",
@@ -2930,5 +2932,27 @@
     "modes": { "light": "Light", "dark": "Dark", "high-contrast": "High contrast" },
     "importErrors": { "unrecognized": "Not a recognized VS Code theme.", "modeRequired": "Choose a mode explicitly, then preview again.", "includeOnly": "Include-only themes cannot be imported. Supply the actual colors.", "noSupportedData": "No supported colors or SQL token rules were found.", "invalidColor": "A supported color has an invalid value.", "invalidRules": "Invalid or excessive token rules." },
     "diagnostics": { "unsupportedKey": "Unsupported field", "unsupportedColor": "Unsupported color", "unsupportedScope": "Unsupported scope", "scopeApproximation": "Approximate SQL scope mapping", "unsupportedStyle": "Unsupported style", "ignoredInclude": "Include not loaded", "ignoredSemanticTokens": "Semantic tokens ignored", "unsupportedReference": "External reference not loaded", "unsupportedSetting": "Unsupported setting", "tokenAlphaFlattened": "Token opacity materialized against the base background", "modeApproximation": "Mode overridden or approximated", "diagnosticsTruncated": "Additional diagnostics omitted" }
+  },
+  "batchEdit": {
+    "title": "Batch edit",
+    "subtitle": "{{rows}} row(s) · {{columns}} editable column(s)",
+    "apply": "Apply",
+    "dirtyCount": "{{count}} cell(s) changed",
+    "noChanges": "No changes yet",
+    "revertRow": "Revert this row",
+    "revertAll": "Revert all",
+    "deleteRows": "Mark rows for deletion",
+    "keyboardHint": "Enter/↓ next row · Tab next column · Esc close",
+    "emptyValue": "(empty)",
+    "nullValue": "NULL",
+    "true": "true",
+    "false": "false",
+    "pk": "primary key",
+    "noKeyHint": "This result has no primary key, so existing rows are read-only. Inserted rows stay editable.",
+    "readonlyGenerated": "Generated column — the database computes this value",
+    "readonlyMasked": "Masked column — reveal it in the grid to edit",
+    "readonlyBlob": "Binary value — edit it in the grid or the row editor",
+    "readonlyNotPhysical": "Computed result column — not a table column",
+    "readonlyNoKey": "No primary key — this row cannot be updated"
   }
 }

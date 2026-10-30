@@ -52,6 +52,7 @@ import {
     CaseLower,
     CaseSensitive,
     Table,
+    Table2,
     ChartColumn,
     Pin,
     PinOff,
@@ -150,6 +151,8 @@ import {getFitColumnWidth} from '@/utils/columnResize';
 import {resolveResultFontFamily} from '@/utils/settings';
 import {JumpToColumnModal} from '@/components/modals/JumpToColumnModal';
 import {SetCellsValueModal} from '@/components/modals/SetCellsValueModal';
+import {BatchEditModal} from '@/components/modals/BatchEditModal';
+import {buildBatchEditModel, type BatchCellWrite, type BatchEditModel} from '@/utils/batchEditGrid';
 import {KeybindingsContext} from '@/contexts/KeybindingsContext';
 
 /** Horizontal padding of a grid cell (px-4 on both sides) plus its 1px border. */
@@ -478,7 +481,24 @@ export const DataGrid = React.memo(function DataGrid({
         setRevealedColIndices(new Set());
         setRevealedCells(new Set());
         setCellRange(null);
+        cellDragRef.current = null;
     }, [data]);
+
+    // Excel-style drag selection. The anchor is the cell where the drag started;
+    // `active` flips on once the pointer leaves that cell, so a plain click still
+    // resolves to a single cell and only a real drag paints a rectangle.
+    const cellDragRef = useRef<{
+        anchor: {rowIndex: number; colIndex: number};
+        active: boolean;
+    } | null>(null);
+    // Set by a drag so the click that follows mouseup does not reset the range.
+    const suppressNextCellClickRef = useRef(false);
+    // Last pointer position, used to auto-scroll while dragging past an edge.
+    const lastPointerRef = useRef<{x: number; y: number} | null>(null);
+    const dragAutoScrollRef = useRef<number | null>(null);
+    // How far inside the viewport edge the pointer must be to start scrolling,
+    // and how many rows/columns one scroll step adds to the range.
+    const DRAG_EDGE_PX = 28;
 
     const [internalSelectedRowIndices, setInternalSelectedRowIndices] = useState<Set<number>>(
         new Set(),
@@ -495,6 +515,16 @@ export const DataGrid = React.memo(function DataGrid({
     const [jumpToColumnOpen, setJumpToColumnOpen] = useState(false);
     // The selection "Edit selection → Set to value…" is asking a value for.
     const [valuePromptSelection, setValuePromptSelection] = useState<EditSelection | null>(null);
+    // The batch edit modal, opened from the context menu or its shortcut. Holds
+    // the frozen selection it was opened for; `null` keeps it closed.
+    const [batchEditSelection, setBatchEditSelection] = useState<EditSelection | null>(null);
+    // Excel-style "type over the selection": typing while a cell range is selected
+    // opens one floating input; every keystroke previews the same value across the
+    // whole rectangle, and Enter (or blur) writes the shown value to all its cells.
+    const [selectionTyping, setSelectionTyping] = useState<{
+        selection: EditSelection;
+        text: string;
+    } | null>(null);
     const editInputRef = useRef<HTMLInputElement>(null);
     const focusTriggerRef = useRef(0);
     // Mirror of editingCell so the commit/keydown callbacks can read the latest
@@ -811,6 +841,12 @@ export const DataGrid = React.memo(function DataGrid({
     // cell-range selection are mutually exclusive.
     const handleCellClick = useCallback(
         (rowIndex: number, colIndex: number, event: React.MouseEvent) => {
+            // A completed drag already set the range; the click that follows
+            // mouseup must not collapse it back to the anchor cell.
+            if (suppressNextCellClickRef.current) {
+                suppressNextCellClickRef.current = false;
+                return;
+            }
             if (event.shiftKey && focusedCell) {
                 setCellRange(buildCellRange(focusedCell, {rowIndex, colIndex}));
             } else {
@@ -822,6 +858,123 @@ export const DataGrid = React.memo(function DataGrid({
         },
         [focusedCell, updateSelection],
     );
+
+    // Extending a drag past the viewport edge keeps selecting rows in that
+    // direction, the way Excel does: hold the pointer near the top or bottom of
+    // the scroll container and the range grows one row per frame while the grid
+    // scrolls with it. Registered once per drag and cleared on mouseup.
+    const stopDragAutoScroll = useCallback(() => {
+        if (dragAutoScrollRef.current !== null) {
+            window.cancelAnimationFrame(dragAutoScrollRef.current);
+            dragAutoScrollRef.current = null;
+        }
+    }, []);
+
+    const startDragAutoScroll = useCallback(() => {
+        if (dragAutoScrollRef.current !== null) return;
+        const step = () => {
+            dragAutoScrollRef.current = null;
+            const drag = cellDragRef.current;
+            const container = parentRef.current;
+            const pointer = lastPointerRef.current;
+            if (!drag?.active || !container || !pointer) return;
+
+            const rect = container.getBoundingClientRect();
+            const delta =
+                pointer.y < rect.top + DRAG_EDGE_PX
+                    ? -1
+                    : pointer.y > rect.bottom - DRAG_EDGE_PX
+                      ? 1
+                      : 0;
+            if (delta === 0) return;
+
+            setCellRange((current) => {
+                if (!current) return current;
+                const nextMin = Math.max(0, Math.min(current.minRow + delta, drag.anchor.rowIndex));
+                const nextMax = Math.min(
+                    mergedRows.length - 1,
+                    Math.max(current.maxRow + delta, drag.anchor.rowIndex),
+                );
+                if (nextMin === current.minRow && nextMax === current.maxRow) return current;
+                return {...current, minRow: nextMin, maxRow: nextMax};
+            });
+            // Walk the viewport one row in the drag direction so the range keeps
+            // growing against the newly revealed rows.
+            const scrolled = container.scrollTop + delta * DATA_GRID_ROW_HEIGHT;
+            container.scrollTop = Math.max(
+                0,
+                Math.min(scrolled, container.scrollHeight - container.clientHeight),
+            );
+            dragAutoScrollRef.current = window.requestAnimationFrame(step);
+        };
+        dragAutoScrollRef.current = window.requestAnimationFrame(step);
+    }, [mergedRows.length]);
+    // Excel-style drag: the drag starts on mousedown, the rectangle follows the
+    // pointer across cells, and mouseup keeps it. Shift+drag keeps extending from
+    // the previously focused cell instead of re-anchoring.
+    const handleCellMouseDown = useCallback(
+        (rowIndex: number, colIndex: number, event: React.MouseEvent) => {
+            // Left button only; a drag that starts on an interactive element
+            // (reveal button, FK link) belongs to that element.
+            if (event.button !== 0) return;
+            const target = event.target as HTMLElement;
+            if (target.closest("button, a, input, select, textarea, [role='button']")) return;
+            if (readonlyProp) return;
+
+            const anchor = event.shiftKey && focusedCell ? focusedCell : {rowIndex, colIndex};
+            cellDragRef.current = {anchor, active: false};
+            // Suppress the text selection a drag would otherwise start across
+            // cells; browsers keep the gesture otherwise.
+            event.preventDefault();
+        },
+        [focusedCell, readonlyProp],
+    );
+
+    const handleCellMouseEnter = useCallback(
+        (rowIndex: number, colIndex: number, event?: React.MouseEvent) => {
+            const drag = cellDragRef.current;
+            if (!drag) return;
+            const {anchor} = drag;
+            if (!drag.active) {
+                // Still on the anchor cell: nothing to paint yet.
+                if (rowIndex === anchor.rowIndex && colIndex === anchor.colIndex) return;
+                drag.active = true;
+            }
+            setCellRange(buildCellRange(anchor, {rowIndex, colIndex}));
+            // Row and column selection are exclusive with a cell range.
+            updateSelection(new Set());
+            setSelectedColIndices(new Set());
+            // Track the pointer so dragging past an edge can keep extending.
+            if (event) lastPointerRef.current = {x: event.clientX, y: event.clientY};
+            startDragAutoScroll();
+        },
+        [updateSelection, startDragAutoScroll],
+    );
+
+    // Ends the drag. Registered on the window so a pointer released outside the
+    // grid (over a header, another panel) still closes the gesture.
+    useEffect(() => {
+        const endDrag = () => {
+            stopDragAutoScroll();
+            const drag = cellDragRef.current;
+            cellDragRef.current = null;
+            if (!drag || !drag.active) return;
+            suppressNextCellClickRef.current = true;
+            setFocusedCell(drag.anchor);
+            // Clear the flag shortly after, so a drag that ends outside the grid
+            // (no click follows) does not swallow the next genuine click.
+            window.setTimeout(() => {
+                suppressNextCellClickRef.current = false;
+            }, 0);
+        };
+        window.addEventListener('mouseup', endDrag);
+        window.addEventListener('blur', endDrag);
+        return () => {
+            window.removeEventListener('mouseup', endDrag);
+            window.removeEventListener('blur', endDrag);
+            stopDragAutoScroll();
+        };
+    }, [stopDragAutoScroll]);
 
     // tableColumns is memoized without selection deps (rebuilding column defs
     // on every selection change would churn react-table), so the header click
@@ -1518,6 +1671,7 @@ export const DataGrid = React.memo(function DataGrid({
     );
 
     const parentRef = useRef<HTMLDivElement>(null);
+
     // Tracks whether this grid was the last one interacted with, so
     // document-level shortcuts (Cmd/Ctrl+A) only act on the active grid when
     // several grids are mounted (e.g. multi-result panels).
@@ -2469,6 +2623,291 @@ export const DataGrid = React.memo(function DataGrid({
         ],
     );
 
+    // Resolves the rectangle a "type over selection" run writes to: the cell range
+    // when there is one, otherwise the selected rows/columns around the anchor.
+    // Primary keys are never overwritten by a whole-row fill, matching paste.
+    const selectionForTyping = useCallback(
+        (anchor: {rowIndex: number; colIndex: number}): EditSelection =>
+            resolveEditSelection(anchor, {
+                cellRange,
+                selectedColIndices,
+                selectedRowIndices,
+                rowCount: mergedRows.length,
+                columnCount: columns.length,
+                excludedRowSelectionCols: new Set(
+                    columns.flatMap((col, idx) =>
+                        pkColumnSet.has(col.toLowerCase()) ? [idx] : [],
+                    ),
+                ),
+            }),
+        [
+            cellRange,
+            selectedColIndices,
+            selectedRowIndices,
+            mergedRows.length,
+            columns,
+            pkColumnSet,
+        ],
+    );
+
+    const canTypeOverSelection = !!tableName && !readonlyProp && !!onPendingChange;
+
+    // The anchor cell's current text, used to seed a run so typing continues at
+    // the end of the existing value instead of replacing it (Excel's F2/typing
+    // behaviour on an already-populated cell). Staged edits win over the loaded
+    // row, so re-opening a cell continues from what the user last typed.
+    const anchorCellText = useCallback(
+        (anchor: {rowIndex: number; colIndex: number}): string => {
+            const mergedRow = mergedRows[anchor.rowIndex];
+            if (!mergedRow) return '';
+            const colName = columns[anchor.colIndex];
+            let value: unknown;
+            if (mergedRow.type === 'insertion') {
+                value =
+                    (mergedRow.tempId
+                        ? pendingInsertions?.[mergedRow.tempId]?.data[colName]
+                        : undefined) ?? mergedRow.rowData[anchor.colIndex];
+            } else {
+                const staged =
+                    pkColumns && pkIndexMaps.length > 0
+                        ? pendingChanges?.[
+                              serializePkKey(buildPkMap(pkColumns, mergedRow.rowData, pkIndexMaps))
+                          ]?.changes
+                        : undefined;
+                value =
+                    staged && colName in staged
+                        ? staged[colName]
+                        : mergedRow.rowData[anchor.colIndex];
+            }
+            return value === null || value === undefined ? '' : String(value);
+        },
+        [mergedRows, columns, pendingInsertions, pendingChanges, pkColumns, pkIndexMaps],
+    );
+
+    // Starts a run over the current selection.
+    //
+    // On a single cell the anchor's existing text is kept and the typed character
+    // is appended, so editing continues at the end of the value. Over a real
+    // range every cell receives the same new value, which is what Excel does when
+    // you type into a multi-cell selection: there is no per-cell text to append
+    // to, and appending to each one independently would be surprising.
+    const beginSelectionTyping = useCallback(
+        (initialChar: string) => {
+            const anchor =
+                focusedCell ??
+                (cellRange ? {rowIndex: cellRange.minRow, colIndex: cellRange.minCol} : null);
+            if (!anchor) return;
+            const selection = selectionForTyping(anchor);
+            if (selection.rows.length === 0 || selection.cols.length === 0) return;
+            const isSingleCell = selection.rows.length === 1 && selection.cols.length === 1;
+            setSelectionTyping({
+                selection,
+                text: isSingleCell ? anchorCellText(anchor) + initialChar : initialChar,
+            });
+        },
+        [focusedCell, cellRange, selectionForTyping, anchorCellText],
+    );
+
+    // Writes the current text to every selected cell in one undo step.
+    const commitSelectionTyping = useCallback(() => {
+        setSelectionTyping((typing) => {
+            if (!typing) return null;
+            const value = typing.text === '' ? null : typing.text;
+            const writes: CellWrite[] = [];
+            for (const rowIndex of typing.selection.rows) {
+                for (const colIndex of typing.selection.cols) {
+                    writes.push({rowIndex, colIndex, value});
+                }
+            }
+            const applied = stageCellWrites(writes);
+            if (applied > 0) {
+                showToast(t('dataGrid.editedCells', {count: applied}), {kind: 'success'});
+            }
+            return null;
+        });
+    }, [stageCellWrites, showToast, t]);
+
+    const cancelSelectionTyping = useCallback(() => setSelectionTyping(null), []);
+
+    // Leaving the grid commits the run, the way Excel applies an edit when you
+    // click another cell, a panel or another window. Focus moves into grid cells
+    // (not the container itself) while navigating, so the check walks up to the
+    // container: only focus that landed outside the grid commits.
+    const handleGridBlur = useCallback(
+        (event: React.FocusEvent<HTMLDivElement>) => {
+            if (!selectionTyping) return;
+            const next = event.relatedTarget as Node | null;
+            if (next && event.currentTarget.contains(next)) return;
+            commitSelectionTyping();
+        },
+        [selectionTyping, commitSelectionTyping],
+    );
+
+    // Excel commits the open edit as soon as the pointer goes down anywhere else —
+    // including another cell of the same grid. Registered on the document in the
+    // capture phase so it runs before the grid's own drag/click handlers, which
+    // would otherwise re-anchor the selection while the run is still open.
+    const selectionTypingRef = useRef(selectionTyping);
+    selectionTypingRef.current = selectionTyping;
+    useEffect(() => {
+        if (!selectionTyping) return;
+        const handlePointerDown = (event: MouseEvent) => {
+            if (!selectionTypingRef.current) return;
+            const target = event.target as HTMLElement | null;
+            // A press on a cell is what Excel treats as "move the edit": commit.
+            // Presses elsewhere inside the grid (scrollbar, header resize handle,
+            // the focus host itself) keep the run open.
+            if (target?.closest('td, th')) {
+                commitSelectionTyping();
+                return;
+            }
+            const grid = parentRef.current;
+            if (grid && target && grid.contains(target)) return;
+            commitSelectionTyping();
+        };
+        document.addEventListener('mousedown', handlePointerDown, true);
+        return () => document.removeEventListener('mousedown', handlePointerDown, true);
+    }, [selectionTyping, commitSelectionTyping]);
+
+    // Keystrokes for an open run: characters append, Backspace removes the last
+    // one, Enter/Tab commit and Escape abandons. Handled on the grid container,
+    // so no input element is needed and the grid keeps the focus throughout.
+    const handleSelectionTypingKey = useCallback(
+        (e: React.KeyboardEvent): boolean => {
+            if (!selectionTyping) return false;
+            if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault();
+                e.stopPropagation();
+                commitSelectionTyping();
+                return true;
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                cancelSelectionTyping();
+                return true;
+            }
+            if (e.key === 'Backspace') {
+                e.preventDefault();
+                e.stopPropagation();
+                setSelectionTyping((current) =>
+                    current ? {...current, text: current.text.slice(0, -1)} : current,
+                );
+                return true;
+            }
+            if (e.ctrlKey || e.metaKey || e.altKey) return false;
+            if (e.key.length === 1) {
+                e.preventDefault();
+                e.stopPropagation();
+                setSelectionTyping((current) =>
+                    current ? {...current, text: current.text + e.key} : current,
+                );
+                return true;
+            }
+            return false;
+        },
+        [selectionTyping, commitSelectionTyping, cancelSelectionTyping],
+    );
+
+    // Opens the batch edit modal for the rows/columns of `selection`, which the
+    // context menu and the shortcut both resolve the same way.
+    const openBatchEdit = useCallback(
+        (selection: EditSelection) => {
+            if (readonlyProp) return;
+            if (selection.rows.length === 0 || selection.cols.length === 0) return;
+            setBatchEditSelection(selection);
+        },
+        [readonlyProp],
+    );
+
+    // The modal's model, rebuilt from the current staged state so reopening it
+    // after a commit shows the pending values instead of the loaded ones.
+    const batchEditModel = useMemo<BatchEditModel | null>(() => {
+        if (!batchEditSelection) return null;
+        const {rows: rowIndices, cols: colIndices} = batchEditSelection;
+        const inputs = rowIndices.flatMap((rowIndex) => {
+            const mergedRow = mergedRows[rowIndex];
+            if (!mergedRow) return [];
+            const isInsertion = mergedRow.type === 'insertion';
+            const values = colIndices.map((colIndex) => {
+                const colName = columns[colIndex];
+                const staged =
+                    isInsertion && mergedRow.tempId
+                        ? pendingInsertions?.[mergedRow.tempId]?.data[colName]
+                        : undefined;
+                if (staged !== undefined) return staged;
+                if (isInsertion) return mergedRow.rowData[colIndex] ?? null;
+                const pending =
+                    pkColumns && pkIndexMaps.length > 0
+                        ? pendingChanges?.[
+                              serializePkKey(buildPkMap(pkColumns, mergedRow.rowData, pkIndexMaps))
+                          ]?.changes
+                        : undefined;
+                return pending && colName in pending
+                    ? pending[colName]
+                    : mergedRow.rowData[colIndex];
+            });
+            return [{rowIndex, type: mergedRow.type, values}];
+        });
+
+        const metadataByName = new Map(
+            (columnMetadata ?? []).map((col) => [col.name.toLowerCase(), col]),
+        );
+
+        return buildBatchEditModel({
+            columns: colIndices.map((colIndex) => {
+                const name = columns[colIndex];
+                const meta = metadataByName.get(name.toLowerCase());
+                return {
+                    colIndex,
+                    name,
+                    dataType: meta?.data_type ?? '',
+                    isPk: !!(meta?.is_pk ?? pkColumnSet.has(name.toLowerCase())),
+                    isNullable: meta?.is_nullable ?? true,
+                    isGenerated: !!meta?.is_generated,
+                    isAutoIncrement: !!meta?.is_auto_increment,
+                };
+            }),
+            rows: inputs,
+            pkColumns: pkColumns ?? null,
+            physicalColumnSet,
+            maskedColumnSet: new Set(
+                columns.filter((_, idx) => maskedColIndices.has(idx)).map((c) => c.toLowerCase()),
+            ),
+            canEditExisting: !!onPendingChange && !!pkColumns && pkIndexMaps.length > 0,
+        });
+    }, [
+        batchEditSelection,
+        mergedRows,
+        columns,
+        pendingInsertions,
+        pendingChanges,
+        pkColumns,
+        pkIndexMaps,
+        columnMetadata,
+        pkColumnSet,
+        physicalColumnSet,
+        maskedColIndices,
+        onPendingChange,
+    ]);
+
+    // Stages the batch editor's changed cells through the grid's normal write
+    // path, so generated/masked/alias guards and the batch-undo grouping apply
+    // exactly as they do for a paste or an inline edit.
+    const handleBatchEditApply = useCallback(
+        (writes: BatchCellWrite[]) => {
+            const applied = stageCellWrites(writes);
+            if (applied > 0) {
+                showToast(t('dataGrid.editedCells', {count: applied}), {kind: 'success'});
+            }
+        },
+        [stageCellWrites, showToast, t],
+    );
+
+    const handleBatchEditClose = useCallback(() => {
+        setBatchEditSelection(null);
+    }, []);
+
     // Pastes clipboard text into the grid as staged edits. The paste target,
     // in priority order: the cell range's top-left, the given cell (context
     // menu), the top of the row selection, or the focused cell. A single
@@ -2670,6 +3109,33 @@ export const DataGrid = React.memo(function DataGrid({
                 return;
             }
 
+            // Open the batch editor on the current selection (range, column or
+            // row selection), the same selection the context menu resolves.
+            if (keybindings?.matchesShortcut(e.nativeEvent, 'batch_edit_grid') && !readonlyProp) {
+                const anchor = focusedCell ?? {
+                    rowIndex: cellRange?.minRow ?? 0,
+                    colIndex: cellRange?.minCol ?? 0,
+                };
+                setContextMenu(null);
+                openBatchEdit(
+                    resolveEditSelection(anchor, {
+                        cellRange,
+                        selectedColIndices,
+                        selectedRowIndices,
+                        rowCount: mergedRows.length,
+                        columnCount: columns.length,
+                        excludedRowSelectionCols: new Set(
+                            columns.flatMap((col, idx) =>
+                                pkColumnSet.has(col.toLowerCase()) ? [idx] : [],
+                            ),
+                        ),
+                    }),
+                );
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+            }
+
             // Let anything that handles keys itself keep them: text inputs, and the
             // focusable controls living inside cells and headers (FK/BLOB buttons,
             // sortable column headers) — Enter must still activate those.
@@ -2679,6 +3145,45 @@ export const DataGrid = React.memo(function DataGrid({
                 Boolean(target.closest?.("button, [role='button'], [role='separator']"))
             ) {
                 return;
+            }
+
+            // An open Excel-style typing run owns the keyboard: characters append
+            // to the value being previewed, Backspace trims it, Enter/Tab write it
+            // to the whole selection and Escape abandons it.
+            if (selectionTyping && handleSelectionTypingKey(e)) {
+                return;
+            }
+
+            // Otherwise a printable character, or Delete, starts a run over the
+            // current selection. Typing continues from the anchor cell's existing
+            // text, so nothing is lost. Modifier chords and navigation keys keep
+            // their own meaning.
+            if (
+                canTypeOverSelection &&
+                !selectionTyping &&
+                !editingCellRef.current &&
+                !e.ctrlKey &&
+                !e.metaKey &&
+                !e.altKey
+            ) {
+                const isPrintable = e.key.length === 1 && e.key !== ' ';
+                const isClear = e.key === 'Delete';
+                if (isPrintable || isClear) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (isClear) {
+                        const anchor =
+                            focusedCell ??
+                            (cellRange
+                                ? {rowIndex: cellRange.minRow, colIndex: cellRange.minCol}
+                                : null);
+                        const selection = anchor ? selectionForTyping(anchor) : null;
+                        if (selection) setSelectionTyping({selection, text: ''});
+                    } else {
+                        beginSelectionTyping(e.key);
+                    }
+                    return;
+                }
             }
 
             const totalRows = mergedRows.length;
@@ -2872,6 +3377,16 @@ export const DataGrid = React.memo(function DataGrid({
             updateSelection,
             rowVirtualizer,
             keybindings,
+            readonlyProp,
+            selectedColIndices,
+            selectedRowIndices,
+            pkColumnSet,
+            openBatchEdit,
+            canTypeOverSelection,
+            beginSelectionTyping,
+            selectionTyping,
+            handleSelectionTypingKey,
+            selectionForTyping,
         ],
     );
 
@@ -3048,6 +3563,21 @@ export const DataGrid = React.memo(function DataGrid({
         setRevealedCells((prev) => toggleSetValue(prev, `${rowIndex}:${colIndex}`));
     }, []);
 
+    // Live preview of a "type over selection" run: the cells the pending text
+    // paints, so the grid shows the value being typed across the whole rectangle
+    // before it is committed.
+    const typingPreview = useMemo(() => {
+        if (!selectionTyping) return null;
+        const {selection, text} = selectionTyping;
+        return {
+            minRow: Math.min(...selection.rows),
+            maxRow: Math.max(...selection.rows),
+            minCol: Math.min(...selection.cols),
+            maxCol: Math.max(...selection.cols),
+            text,
+        };
+    }, [selectionTyping]);
+
     // Stable per-row dependency bundle. Memoizing it lets React.memo on MemoRow
     // skip re-rendering rows that didn't change during scroll.
     const rowCtx: RowCtx = useMemo(
@@ -3076,7 +3606,10 @@ export const DataGrid = React.memo(function DataGrid({
             selectedColIndices,
             clearColSelection,
             cellRange,
+            typingPreview,
             handleCellClick,
+            handleCellMouseDown,
+            handleCellMouseEnter,
             setFocusedCell,
             setExpandedCell,
             setEditingCell,
@@ -3122,7 +3655,10 @@ export const DataGrid = React.memo(function DataGrid({
             selectedColIndices,
             clearColSelection,
             cellRange,
+            typingPreview,
             handleCellClick,
+            handleCellMouseDown,
+            handleCellMouseEnter,
             setFocusedCell,
             setExpandedCell,
             setEditingCell,
@@ -3184,21 +3720,31 @@ export const DataGrid = React.memo(function DataGrid({
                     onClose={() => setValuePromptSelection(null)}
                 />
             )}
+            <BatchEditModal
+                isOpen={batchEditSelection !== null}
+                model={batchEditModel}
+                onApply={handleBatchEditApply}
+                onClose={handleBatchEditClose}
+            />
+
             {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions -- focus host for the spreadsheet keyboard model (arrows, ranges, copy); a full ARIA grid needs per-cell roles and activedescendant */}
             <div
                 ref={parentRef}
                 // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- same focus host: must be reachable with Tab to use the keyboard model
                 tabIndex={0}
                 onKeyDown={handleGridKeyDown}
+                onBlur={handleGridBlur}
                 onScroll={handleScroll}
-                className="h-full overflow-auto border border-default rounded bg-elevated relative focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus"
+                className={`h-full overflow-auto border border-default rounded bg-elevated relative focus:outline-none focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus ${selectionTyping ? 'cursor-text' : ''}`}
                 style={
                     frozenLayout ? {scrollPaddingLeft: frozenLayout.scrollPaddingLeft} : undefined
                 }
             >
                 <table
                     ref={tableRef}
-                    className="w-full text-left border-collapse"
+                    // A drag paints a rectangle instead of selecting text; the
+                    // browser's own text selection would fight it across cells.
+                    className="w-full text-left border-collapse select-none"
                     style={
                         columnWidths ? {tableLayout: 'fixed', width: resizedTableWidth} : undefined
                     }
@@ -3759,6 +4305,17 @@ export const DataGrid = React.memo(function DataGrid({
                                         }),
                                         header: true,
                                     },
+                                    {
+                                        // Spreadsheet-style editor over the same
+                                        // selection: many rows and columns at once.
+                                        label: t('dataGrid.batchEditAction'),
+                                        icon: Table2,
+                                        action: () => {
+                                            setContextMenu(null);
+                                            openBatchEdit(editSelection);
+                                        },
+                                    },
+                                    {separator: true},
                                     {
                                         label: t('dataGrid.fillDown'),
                                         icon: ArrowDownToLine,

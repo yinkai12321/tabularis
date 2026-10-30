@@ -91,8 +91,23 @@ export interface RowCtx {
         minCol: number;
         maxCol: number;
     } | null;
+    /**
+     * Live preview of an Excel-style "type over selection" run: the rectangle being
+     * painted and the text to show in each of its cells.
+     */
+    typingPreview: {
+        minRow: number;
+        maxRow: number;
+        minCol: number;
+        maxCol: number;
+        text: string;
+    } | null;
     /** Cell click: focuses the anchor, or Shift+click extends the range. */
     handleCellClick: (rowIndex: number, colIndex: number, e: React.MouseEvent) => void;
+    /** Starts an Excel-style drag selection on the pressed cell. */
+    handleCellMouseDown: (rowIndex: number, colIndex: number, e: React.MouseEvent) => void;
+    /** Extends the in-progress drag selection to the entered cell. */
+    handleCellMouseEnter: (rowIndex: number, colIndex: number) => void;
     setFocusedCell: React.Dispatch<
         React.SetStateAction<{rowIndex: number; colIndex: number} | null>
     >;
@@ -198,7 +213,10 @@ export const MemoRow = React.memo(function MemoRow(rowCtx: MemoRowProps) {
         toggleRevealCell,
         selectedColIndices,
         cellRange,
+        typingPreview,
         handleCellClick,
+        handleCellMouseDown,
+        handleCellMouseEnter,
         setFocusedCell,
         setExpandedCell,
         setEditingCell,
@@ -292,6 +310,17 @@ export const MemoRow = React.memo(function MemoRow(rowCtx: MemoRowProps) {
                     const cellValue = rowOriginal[colIndex];
                     const isEditing =
                         editingCell?.rowIndex === rowIndex && editingCell?.colIndex === colIndex;
+
+                    // Live value of an in-progress "type over selection" run: every
+                    // cell of the painted rectangle shows the text being typed.
+                    const typingPreviewText =
+                        typingPreview &&
+                        rowIndex >= typingPreview.minRow &&
+                        rowIndex <= typingPreview.maxRow &&
+                        colIndex >= typingPreview.minCol &&
+                        colIndex <= typingPreview.maxCol
+                            ? typingPreview.text
+                            : null;
 
                     const columnInfo: ColumnDisplayInfo = {
                         colName,
@@ -416,7 +445,9 @@ export const MemoRow = React.memo(function MemoRow(rowCtx: MemoRowProps) {
                                 // Shift+click extends the cell range — suppress the browser's
                                 // text selection that a Shift+click would otherwise start.
                                 if (e.shiftKey) e.preventDefault();
+                                handleCellMouseDown(rowIndex, colIndex, e);
                             }}
+                            onMouseEnter={() => handleCellMouseEnter(rowIndex, colIndex)}
                             onClick={(e) => {
                                 // Don't handle row click if clicking on a button
                                 const target = e.target as HTMLElement;
@@ -459,7 +490,11 @@ export const MemoRow = React.memo(function MemoRow(rowCtx: MemoRowProps) {
                                     : ''
                             }
                         >
-                            {isMasked ? (
+                            {typingPreviewText !== null && !isMasked ? (
+                                // Live value of an in-progress "type over selection"
+                                // run, shown on every cell of the rectangle.
+                                <span className="text-primary">{typingPreviewText}</span>
+                            ) : isMasked ? (
                                 <span className="flex items-center gap-1.5 select-none">
                                     <span className="text-muted tracking-widest">
                                         {MASKED_PLACEHOLDER}

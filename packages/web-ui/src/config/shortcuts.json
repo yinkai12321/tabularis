@@ -170,6 +170,16 @@
     "overridable": false
   },
   {
+    "id": "batch_edit_grid",
+    "category": "data_grid",
+    "defaultMac": "⇧+⌘+E",
+    "defaultWin": "Ctrl+Shift+E",
+    "macMatch": {"metaKey": true, "shiftKey": true, "key": "e", "code": "KeyE"},
+    "winMatch": {"ctrlKey": true, "shiftKey": true, "key": "e", "code": "KeyE"},
+    "i18nKey": "settings.shortcuts.batchEditGrid",
+    "overridable": true
+  },
+  {
     "id": "tab_switcher",
     "category": "editor",
     "defaultMac": "Ctrl+Tab",

@@ -3646,3 +3646,353 @@ describe('DataGrid selected-row export (#1154)', () => {
         expect(decodedDownload(0)).toBe('id,name\n1,Alice\n');
     });
 });
+
+describe('DataGrid drag selection (Excel-style)', () => {
+    beforeAll(() => {
+        vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(800);
+        vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(400);
+    });
+    afterAll(() => {
+        vi.restoreAllMocks();
+    });
+
+    const renderGrid = () =>
+        render(
+            <DataGrid
+                columns={['id', 'name']}
+                data={[
+                    [1, 'Alice'],
+                    [2, 'Bob'],
+                    [3, 'Carol'],
+                ]}
+                selectedRows={new Set()}
+                onSelectionChange={vi.fn()}
+            />,
+        );
+
+    const cellAt = (container: HTMLElement, rowIndex: number, colIndex: number) =>
+        container.querySelector(
+            `tr[data-row-index="${rowIndex}"] td[data-col-index="${colIndex}"]`,
+        )!;
+
+    // The range highlight the row marks the selected rectangle with.
+    const isRangeHighlighted = (cell: Element) => cell.className.includes('bg-accent-primary/15');
+
+    it('paints a rectangle from the anchor to the cell the pointer entered', () => {
+        const {container} = renderGrid();
+        fireEvent.mouseDown(cellAt(container, 0, 0), {button: 0});
+        fireEvent.mouseEnter(cellAt(container, 2, 1));
+
+        expect(isRangeHighlighted(cellAt(container, 0, 0))).toBe(true);
+        expect(isRangeHighlighted(cellAt(container, 1, 0))).toBe(true);
+        expect(isRangeHighlighted(cellAt(container, 2, 1))).toBe(true);
+    });
+
+    it('keeps the range after mouseup and swallows the following click', () => {
+        const {container} = renderGrid();
+        const anchor = cellAt(container, 0, 0);
+        fireEvent.mouseDown(anchor, {button: 0});
+        fireEvent.mouseEnter(cellAt(container, 1, 1));
+        fireEvent.mouseUp(cellAt(container, 1, 1));
+        // The browser still dispatches a click on the anchor cell after a drag.
+        fireEvent.click(anchor);
+
+        expect(isRangeHighlighted(cellAt(container, 1, 1))).toBe(true);
+    });
+
+    it('leaves a plain click as a single cell', () => {
+        const {container} = renderGrid();
+        fireEvent.mouseDown(cellAt(container, 1, 1), {button: 0});
+        fireEvent.mouseUp(cellAt(container, 1, 1));
+        fireEvent.click(cellAt(container, 1, 1));
+
+        expect(isRangeHighlighted(cellAt(container, 1, 0))).toBe(false);
+        expect(isRangeHighlighted(cellAt(container, 0, 1))).toBe(false);
+    });
+
+    it('extends a range in both directions from the anchor', () => {
+        const {container} = renderGrid();
+        fireEvent.mouseDown(cellAt(container, 2, 1), {button: 0});
+        fireEvent.mouseEnter(cellAt(container, 0, 0));
+
+        expect(isRangeHighlighted(cellAt(container, 0, 0))).toBe(true);
+        expect(isRangeHighlighted(cellAt(container, 2, 1))).toBe(true);
+        expect(isRangeHighlighted(cellAt(container, 1, 1))).toBe(true);
+    });
+
+    it('ignores a drag started with the right button', () => {
+        const {container} = renderGrid();
+        fireEvent.mouseDown(cellAt(container, 0, 0), {button: 2});
+        fireEvent.mouseEnter(cellAt(container, 2, 1));
+
+        expect(isRangeHighlighted(cellAt(container, 2, 1))).toBe(false);
+    });
+
+    it('does not select when the drag starts on a cell button', () => {
+        const {container} = renderGrid();
+        const cell = cellAt(container, 0, 0);
+        const button = document.createElement('button');
+        cell.appendChild(button);
+        fireEvent.mouseDown(button, {button: 0, bubbles: true});
+        fireEvent.mouseEnter(cellAt(container, 2, 1));
+
+        expect(isRangeHighlighted(cellAt(container, 2, 1))).toBe(false);
+    });
+});
+
+describe('DataGrid typing over a selection (Excel-style)', () => {
+    beforeAll(() => {
+        vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(800);
+        vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(400);
+    });
+    afterAll(() => {
+        vi.restoreAllMocks();
+    });
+
+    const cellAt = (container: HTMLElement, rowIndex: number, colIndex: number) =>
+        container.querySelector(
+            `tr[data-row-index="${rowIndex}"] td[data-col-index="${colIndex}"]`,
+        )!;
+
+    const gridOf = (container: HTMLElement) => container.querySelector('div[tabindex="0"]')!;
+
+    const renderEditableGrid = (onPendingChange = vi.fn()) =>
+        render(
+            <DataGrid
+                columns={['id', 'name']}
+                data={[
+                    [1, 'Alice'],
+                    [2, 'Bob'],
+                ]}
+                tableName="users"
+                pkColumns={['id']}
+                columnMetadata={[
+                    {
+                        name: 'id',
+                        data_type: 'integer',
+                        is_pk: true,
+                        is_nullable: false,
+                        is_auto_increment: false,
+                    },
+                    {
+                        name: 'name',
+                        data_type: 'text',
+                        is_pk: false,
+                        is_nullable: true,
+                        is_auto_increment: false,
+                    },
+                ]}
+                onPendingChange={onPendingChange}
+                onBeginBatchEdit={vi.fn()}
+                onEndBatchEdit={vi.fn()}
+            />,
+        );
+
+    // Types the given characters straight into the grid (no input element).
+    const typeInto = (grid: HTMLElement, text: string) => {
+        for (const char of text) {
+            fireEvent.keyDown(grid, {key: char});
+        }
+    };
+
+    // Selects the rectangle from (r1,c1) to (r2,c2) with a real drag.
+    const dragSelect = (container: HTMLElement, from: [number, number], to: [number, number]) => {
+        fireEvent.mouseDown(cellAt(container, from[0], from[1]), {button: 0});
+        fireEvent.mouseEnter(cellAt(container, to[0], to[1]));
+        fireEvent.mouseUp(cellAt(container, to[0], to[1]));
+    };
+
+    it('does not render a floating input while typing', () => {
+        const {container} = renderEditableGrid();
+        const grid = gridOf(container);
+        fireEvent.click(cellAt(container, 0, 1));
+        fireEvent.keyDown(grid, {key: 'x'});
+
+        expect(container.querySelector('input')).toBeNull();
+        expect(document.querySelector('input[aria-label="Edit selected cells"]')).toBeNull();
+        // The typed text is previewed in the cell itself.
+        expect(cellAt(container, 0, 1)).toHaveTextContent('x');
+    });
+
+    it('continues from the existing cell text instead of replacing it', () => {
+        const {container} = renderEditableGrid();
+        const grid = gridOf(container);
+        fireEvent.click(cellAt(container, 0, 1));
+        typeInto(grid, '!');
+
+        expect(cellAt(container, 0, 1)).toHaveTextContent('Alice!');
+    });
+
+    it('previews the typed value across every cell of the range', () => {
+        const {container} = renderEditableGrid();
+        const grid = gridOf(container);
+        dragSelect(container, [0, 1], [1, 1]);
+        typeInto(grid, '!');
+
+        // Excel semantics: a multi-cell selection receives the same new value,
+        // it does not append to each cell's own text.
+        expect(cellAt(container, 0, 1)).toHaveTextContent('!');
+        expect(cellAt(container, 1, 1)).toHaveTextContent('!');
+        // A cell outside the range is untouched.
+        expect(cellAt(container, 0, 0)).toHaveTextContent('1');
+    });
+
+    it('writes the previewed value to every selected cell on Enter', () => {
+        const onPendingChange = vi.fn();
+        const {container} = renderEditableGrid(onPendingChange);
+        const grid = gridOf(container);
+        dragSelect(container, [0, 1], [1, 1]);
+        typeInto(grid, '!');
+        fireEvent.keyDown(grid, {key: 'Enter'});
+
+        expect(onPendingChange).toHaveBeenCalledTimes(2);
+        const written = onPendingChange.mock.calls.map((call) => [call[0], call[1], call[2]]);
+        expect(written).toEqual(
+            expect.arrayContaining([
+                [{id: 1}, 'name', '!'],
+                [{id: 2}, 'name', '!'],
+            ]),
+        );
+    });
+
+    it('removes the last character on Backspace while a run is open', () => {
+        const onPendingChange = vi.fn();
+        const {container} = renderEditableGrid(onPendingChange);
+        const grid = gridOf(container);
+        fireEvent.click(cellAt(container, 0, 1));
+        typeInto(grid, '!!');
+        fireEvent.keyDown(grid, {key: 'Backspace'});
+
+        expect(cellAt(container, 0, 1)).toHaveTextContent('Alice!');
+        fireEvent.keyDown(grid, {key: 'Enter'});
+        expect(onPendingChange).toHaveBeenCalledWith({id: 1}, 'name', 'Alice!');
+    });
+
+    it('commits when focus leaves the grid', async () => {
+        const onPendingChange = vi.fn();
+        const {container} = render(
+            <>
+                <DataGrid
+                    columns={['id', 'name']}
+                    data={[
+                        [1, 'Alice'],
+                        [2, 'Bob'],
+                    ]}
+                    tableName="users"
+                    pkColumns={['id']}
+                    onPendingChange={onPendingChange}
+                />
+                <button type="button">outside</button>
+            </>,
+        );
+        const grid = gridOf(container);
+        fireEvent.click(cellAt(container, 0, 1));
+        typeInto(grid, '!');
+        // Moving focus to a control outside the grid applies the edit.
+        screen.getByRole('button', {name: 'outside'}).focus();
+        fireEvent.blur(grid, {relatedTarget: screen.getByRole('button', {name: 'outside'})});
+
+        await waitFor(() =>
+            expect(onPendingChange).toHaveBeenCalledWith({id: 1}, 'name', 'Alice!'),
+        );
+    });
+
+    it('keeps the run open when focus moves inside the grid without a click', () => {
+        const onPendingChange = vi.fn();
+        const {container} = renderEditableGrid(onPendingChange);
+        const grid = gridOf(container);
+        fireEvent.click(cellAt(container, 0, 1));
+        typeInto(grid, '!');
+        // Plain focus movement (no press) is not Excel's "move the edit".
+        fireEvent.blur(grid, {relatedTarget: cellAt(container, 1, 1)});
+
+        expect(onPendingChange).not.toHaveBeenCalled();
+        expect(cellAt(container, 0, 1)).toHaveTextContent('Alice!');
+    });
+
+    it('commits when another cell of the same grid is pressed', () => {
+        const onPendingChange = vi.fn();
+        const {container} = renderEditableGrid(onPendingChange);
+        const grid = gridOf(container);
+        fireEvent.click(cellAt(container, 0, 1));
+        typeInto(grid, '!');
+        // Clicking a different cell applies the edit, like Excel.
+        fireEvent.mouseDown(cellAt(container, 1, 1), {button: 0});
+
+        expect(onPendingChange).toHaveBeenCalledWith({id: 1}, 'name', 'Alice!');
+    });
+
+    it('keeps the run open when the press lands on the grid focus host itself', () => {
+        const onPendingChange = vi.fn();
+        const {container} = renderEditableGrid(onPendingChange);
+        const grid = gridOf(container);
+        fireEvent.click(cellAt(container, 0, 1));
+        typeInto(grid, '!');
+        fireEvent.mouseDown(grid, {button: 0});
+
+        expect(onPendingChange).not.toHaveBeenCalled();
+    });
+
+    it('commits when the pointer is pressed outside the grid', () => {
+        const onPendingChange = vi.fn();
+        const {container} = renderEditableGrid(onPendingChange);
+        const grid = gridOf(container);
+        fireEvent.click(cellAt(container, 0, 1));
+        typeInto(grid, '!');
+        fireEvent.mouseDown(document.body);
+
+        expect(onPendingChange).toHaveBeenCalledWith({id: 1}, 'name', 'Alice!');
+    });
+
+    it('writes nothing when Escape abandons the run', () => {
+        const onPendingChange = vi.fn();
+        const {container} = renderEditableGrid(onPendingChange);
+        const grid = gridOf(container);
+        fireEvent.click(cellAt(container, 0, 1));
+        typeInto(grid, 'z');
+        fireEvent.keyDown(grid, {key: 'Escape'});
+
+        expect(onPendingChange).not.toHaveBeenCalled();
+        expect(cellAt(container, 0, 1)).toHaveTextContent('Alice');
+    });
+
+    it('clears the selection with Delete', () => {
+        const onPendingChange = vi.fn();
+        const {container} = renderEditableGrid(onPendingChange);
+        const grid = gridOf(container);
+        dragSelect(container, [0, 1], [1, 1]);
+        fireEvent.keyDown(grid, {key: 'Delete'});
+        fireEvent.keyDown(grid, {key: 'Enter'});
+
+        const written = onPendingChange.mock.calls.map((call) => call[2]);
+        expect(written).toEqual([null, null]);
+    });
+
+    it('does not start a run on modified chords or navigation keys', () => {
+        const {container} = renderEditableGrid();
+        const grid = gridOf(container);
+        fireEvent.click(cellAt(container, 0, 1));
+
+        fireEvent.keyDown(grid, {key: 'c', ctrlKey: true});
+        expect(cellAt(container, 0, 1)).toHaveTextContent('Alice');
+
+        fireEvent.keyDown(grid, {key: 'ArrowDown'});
+        expect(cellAt(container, 0, 1)).toHaveTextContent('Alice');
+    });
+
+    it('stays disabled for a readonly grid', () => {
+        const {container} = render(
+            <DataGrid
+                columns={['id', 'name']}
+                data={[[1, 'Alice']]}
+                selectedRows={new Set()}
+                onSelectionChange={vi.fn()}
+                readonly
+            />,
+        );
+        fireEvent.click(cellAt(container, 0, 1));
+        fireEvent.keyDown(gridOf(container), {key: 'x'});
+
+        expect(cellAt(container, 0, 1)).toHaveTextContent('Alice');
+    });
+});
